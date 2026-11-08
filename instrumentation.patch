@@ -1,0 +1,211 @@
+diff --git a/amm_sim_rs/src/evm/strategy.rs b/amm_sim_rs/src/evm/strategy.rs
+index 1d06af1..c7e48aa 100644
+--- a/amm_sim_rs/src/evm/strategy.rs
++++ b/amm_sim_rs/src/evm/strategy.rs
+@@ -9,6 +9,46 @@ use revm::{
+ };
+ use thiserror::Error;
+ 
++// ---- IMD gas instrumentation (audit only; does not change gas limits or economics) ----
++use std::collections::BTreeMap;
++use std::sync::Mutex;
++
++/// Per (role, callback) call statistics.
++#[derive(Clone, Default, Debug)]
++pub struct CallStats {
++    pub calls: u64,
++    pub ok: u64,
++    pub max_ok_gas: u64,
++    pub sum_ok_gas: u128,
++    pub oog: u64,
++    pub revert: u64,
++    pub other_halt: u64,
++    pub tx_error: u64,
++    pub bad_return: u64,
++}
++
++impl CallStats {
++    fn merge(&mut self, o: &CallStats) {
++        self.calls += o.calls; self.ok += o.ok; self.max_ok_gas = self.max_ok_gas.max(o.max_ok_gas);
++        self.sum_ok_gas += o.sum_ok_gas; self.oog += o.oog; self.revert += o.revert;
++        self.other_halt += o.other_halt; self.tx_error += o.tx_error; self.bad_return += o.bad_return;
++    }
++}
++
++pub static GAS_STATS: Mutex<BTreeMap<(String, String), CallStats>> = Mutex::new(BTreeMap::new());
++
++pub fn gas_stats_snapshot() -> Vec<(String, String, CallStats)> {
++    GAS_STATS.lock().unwrap().iter().map(|((r, c), v)| (r.clone(), c.clone(), v.clone())).collect()
++}
++
++pub fn gas_stats_reset() { GAS_STATS.lock().unwrap().clear(); }
++
++const CB_INIT: usize = 0;
++const CB_SWAP: usize = 1;
++const CB_NAME: usize = 2;
++const CB_NAMES: [&str; 3] = ["afterInitialize", "afterSwap", "getName"];
++// ---- end instrumentation header ----
++
+ use crate::types::trade_info::{encode_after_initialize, decode_fee_pair, TradeInfo, SELECTOR_GET_NAME};
+ use crate::types::wad::Wad;
+ 
+@@ -56,16 +96,33 @@ pub struct EVMStrategy {
+     db: InMemoryDB,
+     /// Pre-allocated calldata buffer for after_swap (196 bytes)
+     trade_calldata: [u8; 196],
++    /// Instrumentation: role label given at construction ("Submission"/"Baseline").
++    role: String,
++    /// Instrumentation: local per-callback stats, flushed to GAS_STATS on drop.
++    stats: [CallStats; 3],
++}
++
++impl Drop for EVMStrategy {
++    fn drop(&mut self) {
++        let mut g = GAS_STATS.lock().unwrap();
++        for (i, st) in self.stats.iter().enumerate() {
++            if st.calls > 0 {
++                g.entry((self.role.clone(), CB_NAMES[i].to_string())).or_default().merge(st);
++            }
++        }
++    }
+ }
+ 
+ impl EVMStrategy {
+     /// Create a new EVM strategy from compiled bytecode.
+     pub fn new(bytecode: Vec<u8>, default_name: String) -> Result<Self, EVMError> {
+         let mut strategy = Self {
+-            name: default_name,
++            name: default_name.clone(),
+             bytecode: bytecode.clone(),
+             db: InMemoryDB::default(),
+             trade_calldata: [0u8; 196],
++            role: default_name,
++            stats: Default::default(),
+         };
+ 
+         strategy.deploy()?;
+@@ -137,7 +194,7 @@ impl EVMStrategy {
+ 
+     /// Fetch the strategy name from the contract.
+     fn fetch_name(&mut self) -> Result<(), EVMError> {
+-        let result = self.call(&SELECTOR_GET_NAME, GAS_LIMIT_NAME)?;
++        let result = self.call(&SELECTOR_GET_NAME, GAS_LIMIT_NAME, CB_NAME)?;
+ 
+         // Decode string return value
+         // String is encoded as: offset (32 bytes) + length (32 bytes) + data
+@@ -166,10 +223,11 @@ impl EVMStrategy {
+     /// Returns (bid_fee, ask_fee) in WAD.
+     pub fn after_initialize(&mut self, initial_x: Wad, initial_y: Wad) -> Result<(Wad, Wad), EVMError> {
+         let calldata = encode_after_initialize(initial_x, initial_y);
+-        let result = self.call(&calldata, GAS_LIMIT_INIT)?;
++        let result = self.call(&calldata, GAS_LIMIT_INIT, CB_INIT)?;
+ 
+-        decode_fee_pair(&result)
+-            .ok_or_else(|| EVMError::InvalidReturnData("Failed to decode fee pair".into()))
++        let d = decode_fee_pair(&result);
++        if d.is_none() { self.stats[CB_INIT].bad_return += 1; }
++        d.ok_or_else(|| EVMError::InvalidReturnData("Failed to decode fee pair".into()))
+     }
+ 
+     /// Handle a trade event and return updated fees.
+@@ -182,10 +240,11 @@ impl EVMStrategy {
+ 
+         // Copy calldata to avoid borrow conflict
+         let calldata = self.trade_calldata;
+-        let result = self.call(&calldata, GAS_LIMIT_TRADE)?;
++        let result = self.call(&calldata, GAS_LIMIT_TRADE, CB_SWAP)?;
+ 
+-        decode_fee_pair(&result)
+-            .ok_or_else(|| EVMError::InvalidReturnData("Failed to decode fee pair".into()))
++        let d = decode_fee_pair(&result);
++        if d.is_none() { self.stats[CB_SWAP].bad_return += 1; }
++        d.ok_or_else(|| EVMError::InvalidReturnData("Failed to decode fee pair".into()))
+     }
+ 
+     /// Reset the strategy for a new simulation.
+@@ -194,7 +253,8 @@ impl EVMStrategy {
+     }
+ 
+     /// Make a call to the contract.
+-    fn call(&mut self, calldata: &[u8], gas_limit: u64) -> Result<Vec<u8>, EVMError> {
++    fn call(&mut self, calldata: &[u8], gas_limit: u64, cb: usize) -> Result<Vec<u8>, EVMError> {
++        self.stats[cb].calls += 1;
+         let mut evm = Evm::builder()
+             .with_db(&mut self.db)
+             .modify_tx_env(|tx| {
+@@ -206,11 +266,16 @@ impl EVMStrategy {
+             })
+             .build();
+ 
+-        let result = evm.transact_commit()
+-            .map_err(|e| EVMError::ExecutionFailed(format!("{:?}", e)))?;
++        let result = match evm.transact_commit() {
++            Ok(r) => r,
++            Err(e) => { self.stats[cb].tx_error += 1; return Err(EVMError::ExecutionFailed(format!("{:?}", e))); }
++        };
+ 
+         match result {
+-            ExecutionResult::Success { output, .. } => {
++            ExecutionResult::Success { output, gas_used, .. } => {
++                let st = &mut self.stats[cb];
++                st.ok += 1; st.sum_ok_gas += gas_used as u128;
++                if gas_used > st.max_ok_gas { st.max_ok_gas = gas_used; }
+                 match output {
+                     Output::Call(data) => Ok(data.to_vec()),
+                     Output::Create(_, _) => {
+@@ -219,12 +284,15 @@ impl EVMStrategy {
+                 }
+             }
+             ExecutionResult::Revert { output, .. } => {
++                self.stats[cb].revert += 1;
+                 Err(EVMError::ExecutionFailed(format!("Reverted: {:?}", output)))
+             }
+             ExecutionResult::Halt { reason, .. } => {
+                 if matches!(reason, revm::primitives::HaltReason::OutOfGas(_)) {
++                    self.stats[cb].oog += 1;
+                     Err(EVMError::OutOfGas)
+                 } else {
++                    self.stats[cb].other_halt += 1;
+                     Err(EVMError::ExecutionFailed(format!("Halted: {:?}", reason)))
+                 }
+             }
+diff --git a/amm_sim_rs/src/lib.rs b/amm_sim_rs/src/lib.rs
+index 35d9e59..b3e66f9 100644
+--- a/amm_sim_rs/src/lib.rs
++++ b/amm_sim_rs/src/lib.rs
+@@ -65,11 +65,35 @@ fn run_single(
+         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+ }
+ 
++/// Instrumentation: snapshot of per-(role, callback) EVM call stats as dicts.
++#[pyfunction]
++fn gas_stats(py: Python<'_>) -> PyResult<Vec<PyObject>> {
++    use pyo3::types::PyDict;
++    let mut out = Vec::new();
++    for (role, cb, st) in crate::evm::strategy::gas_stats_snapshot() {
++        let d = PyDict::new_bound(py);
++        d.set_item("role", role)?; d.set_item("callback", cb)?;
++        d.set_item("calls", st.calls)?; d.set_item("ok", st.ok)?;
++        d.set_item("max_ok_gas", st.max_ok_gas)?; d.set_item("sum_ok_gas", st.sum_ok_gas as u64)?;
++        d.set_item("oog", st.oog)?; d.set_item("revert", st.revert)?;
++        d.set_item("other_halt", st.other_halt)?; d.set_item("tx_error", st.tx_error)?;
++        d.set_item("bad_return", st.bad_return)?;
++        out.push(d.into_any().unbind());
++    }
++    Ok(out)
++}
++
++/// Instrumentation: clear stats.
++#[pyfunction]
++fn gas_stats_reset() { crate::evm::strategy::gas_stats_reset(); }
++
+ /// Python module definition
+ #[pymodule]
+ fn amm_sim_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_function(wrap_pyfunction!(run_batch, m)?)?;
+     m.add_function(wrap_pyfunction!(run_single, m)?)?;
++    m.add_function(wrap_pyfunction!(gas_stats, m)?)?;
++    m.add_function(wrap_pyfunction!(gas_stats_reset, m)?)?;
+     m.add_class::<SimulationConfig>()?;
+     m.add_class::<LightweightSimResult>()?;
+     m.add_class::<BatchSimulationResult>()?;
