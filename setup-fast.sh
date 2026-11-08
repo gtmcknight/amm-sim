@@ -12,5 +12,7 @@ command -v uv >/dev/null 2>&1 || { fetch https://github.com/astral-sh/uv/release
 uv venv -q --python 3.12 .venv
 uv pip install -q "$WHEEL" "numpy>=1.24" "py-solc-x==2.1.0" "pyrevm==0.3.7"
 uv pip install -q --no-deps -e .
+case "$WHEEL" in *post1*) SO=ff88b6353c2aad7342f0a26194f7347e78b9c3b38d683a7449006d423978cd14;; *) SO=414ea6d201d299b2967b2aee72c9704758fa69acf6df6cd295d83598118efd37;; esac; SO=${AMM_SO_SHA:-$SO}
+python -c "import hashlib,os,sys,amm_sim_rs; p=os.path.join(os.path.dirname(amm_sim_rs.__file__),'amm_sim_rs.abi3.so'); h=hashlib.sha256(open(p,'rb').read()).hexdigest(); print('amm_sim_rs.abi3.so sha256',h); sys.exit(0 if h==sys.argv[1] else 1)" $SO || { echo "BLOCKED engine: .so hash is not $SO"; exit 3; }
 python -c "import solcx; solcx.install_solc('0.8.24')" >/dev/null
 amm-match validate contracts/src/StarterStrategy.sol
