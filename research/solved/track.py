@@ -8,9 +8,9 @@ The true arb/retail flag is used throughout; real.py and latt.py infer it.
 usage: python3 -I track.py <pol.json> <modes|none> [more mode sets ...]
 """
 import sys, os, math, json, time
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R
 from evalpol import DPPolicy, load, stats, CALIB
 
@@ -89,11 +89,11 @@ if __name__ == '__main__':
     seeds = list(range(10000, 12048)) if not os.environ.get('NSEED') else list(range(10000, 10000 + int(os.environ['NSEED'])))
     rows = json.load(open(CALIB)); ref = {}
     for r in rows: ref.setdefault(r['kind'], {})[r['seed']] = r
-    with Pool(14) as pool:
+    if True:
         for ms in sys.argv[2:]:
             modes = [] if ms == 'none' else ms.split(',')
             t0 = time.time()
-            res = pool.map(ev, [(path, modes, seeds[i:i + 8]) for i in range(0, len(seeds), 8)], chunksize=1)
+            res = pmap(ev, [(path, modes, seeds[i:i + 8]) for i in range(0, len(seeds), 8)])
             res = {r[0]: r for b in res for r in b}
             n = len(seeds); mean = lambda i: sum(res[s][i] for s in seeds) / n
             mh, seh = stats([res[s][1] - ref['HA'][s]['edge'] for s in seeds])

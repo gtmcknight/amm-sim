@@ -2,8 +2,8 @@
 Writes clsdata.json (one row per first trade) and prints the misread rate by where the crossed quote sat.
 usage: python3 -I clsdata.py [seed0] [n]"""
 import sys, os, math, json
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R, latt, real
 from evalpol import load
 
@@ -38,7 +38,7 @@ if __name__ == '__main__':
     s0 = int(sys.argv[1]) if len(sys.argv) > 1 else 50000
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 84
     seeds = list(range(s0, s0 + n))
-    with Pool(os.cpu_count()) as pool: res = pool.map(ev, [seeds[i:i + 6] for i in range(0, len(seeds), 6)])
+    res = pmap(ev, [seeds[i:i + 6] for i in range(0, len(seeds), 6)])
     rows = [r for b in res for r in b]
     json.dump(rows, open(os.path.join(HERE, 'clsdata.json'), 'w'))
     m = len(rows); print('first trades', m, 'arb share %.3f' % (sum(r[0] for r in rows) / m), 'misread %.4f' % (sum(r[7] for r in rows) / m))

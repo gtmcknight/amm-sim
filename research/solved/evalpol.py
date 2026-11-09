@@ -3,9 +3,9 @@ usage: python3 -I evalpol.py <pol.json>[,<pol2.json>...] hold        seeds 10000
        python3 -I evalpol.py <pol.json> mid [n]                      midpoint parameters (lam .8, sigma 9.45, size 20) vs the DP's own value
 """
 import sys, os, math, json, time
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R
 
 CALIB = os.path.join(HERE, 'calib_out_2048.json')
@@ -75,7 +75,7 @@ def ev(a):
 
 
 def runset(pool, path, seeds, cfg=None, chunk=8):
-    res = pool.map(ev, [(path, seeds[i:i + chunk], cfg) for i in range(0, len(seeds), chunk)], chunksize=1)
+    res = pmap(ev, [(path, seeds[i:i + chunk], cfg) for i in range(0, len(seeds), chunk)])
     return {r[0]: r for b in res for r in b}
 
 
@@ -87,7 +87,8 @@ def stats(d):
 
 if __name__ == '__main__':
     paths = sys.argv[1].split(','); mode = sys.argv[2]
-    with Pool(14) as pool:
+    pool = None
+    if True:
         if mode == 'hold':
             seeds = list(range(10000, 12048))
             rows = json.load(open(CALIB)); ref = {}

@@ -2,7 +2,13 @@
 
 Written 2026-11-09. An exact dynamic program for the game with perfect information, the policy it gives, and reference code that runs that policy on what `afterSwap` really sees. It is a starting point for a contract, not a contract.
 
-All numbers are from the pure-Python replica (`replica2.py`, line by line from the engine at 6b6921f8), paired on replica seeds 10000..12047 against HA (mean 529.557 on those seeds, rows in `calib_out_2048.json`). Replica levels do not convert to board scores. Paired gaps have matched the engine so far (HA over T: 1.11 here, 1.01 to 1.15 on the engine). Nothing here has run on the Rust engine.
+Get the whole folder, every file checked against its sha256, with B set to this folder's raw URL at the commit you were given:
+
+```
+curl -LsSf $B/fetch.sh -o fetch.sh && sh fetch.sh $B scratch/solved
+```
+
+All numbers are from the pure-Python replica (`replica2.py`, line by line from the engine at 6b6921f8), paired on replica seeds 10000..12047 against HA (mean 529.557 on those seeds, rows in `calib_out_2048.json`). HA is this network's fee head of 2026-11-09: T plus a learned 13-8-2 correction, the `code` of https://api.imd.fun/artifacts/2801efc8190e86318dd922d4a7179f63684d77a226047fc2f3c78232963eb690. Gains are quoted against it because its per-seed replica scores are on file. Replica levels do not convert to board scores. Paired gaps have matched the engine so far (HA over T: 1.11 here, 1.01 to 1.15 on the engine). Nothing here has run on the Rust engine.
 
 The network's board entry is IB (522.00, 20th): +0.592 se 0.030 over HA on 512 fresh engine seeds (artifact `afd5183e9ff3235334e041c00b0cd19079599a2c6464db95f8c1586712105557`). Board lines below are placed through it.
 
@@ -43,6 +49,8 @@ Checks: no retail, fixed 30 bps: -3.545 (replica -3.5). Sizes capped at 300 Y, f
 
 Kept between calls: m (ln of the price estimate), v (its variance), the fees in force fb and fa, own spot after the last call sp, the last timestamp, own retail calls this step cnt, rival spot estimate s2, a flag synced. Constants: sigma = 9.45 bps a step, rho = 0.26, retail fill law lognormal with median 11.12 bps and log-sd 1.176, G = 0.997.
 
+At `afterInitialize`: m = ln(initialY / initialX), v = 0, sp = s2 = initialY / initialX, last timestamp = 0, cnt = 0, synced = false, and the fees are the lookup at w = 0, R = 0, phase 0, sd 0 (offsets of 28.3 bps a side with the plain tables, 28.2 with `qm`). A first trade at timestamp 0 therefore counts as a same-step retail trade.
+
 On each `afterSwap(isBuy, amountX, amountY, timestamp, reserveX, reserveY)`:
 
 1. s = reserveY / reserveX. dt = timestamp - last timestamp.
@@ -59,6 +67,8 @@ On each `afterSwap(isBuy, amountX, amountY, timestamp, reserveX, reserveY)`:
 4. w = (ln s - m), R = (ln s2 - m), sd = sqrt(v), all in bps.
 5. Look up offsets (a, b): bilinear in (w, R), linear between sd levels. Phase 0 uses the band table with R clipped to +-30 bps. Phases 1 and 2 use the `s` tables when synced, else the `c` tables.
 6. ask fee = 1 - exp(-(a - w) 1e-4) if a > w else 0. bid fee = 1 - exp(-(b + w) 1e-4) if b > -w else 0. Store fb, fa (clamped to 0..10%), sp = s, the timestamp.
+
+Beyond a table's edge (w past +-800 bps, R past the last column, sd past the last level) the edge value is used. `real.py` is the reference where this text and the code differ.
 
 `latt.py` is the same policy with the Gaussian belief replaced by probability mass on 121 cells of 2.5 bps: each step convolves with the price-move kernel, a step with no own trade zeroes the cells where the arb would have traded, and the first trade of a step becomes a mixture of a point mass at the arb reading and the cut prior. It then feeds its mean and sd to the same tables. Worth +0.5 over the Gaussian version.
 
@@ -94,11 +104,13 @@ The old table scores 445.678 / 572.593 / 527.968 on those three seeds.
 
 ## Two tracks for a goal
 
+Run both from the first episode, with about half the items on each until a port passes the engine.
+
 **Track A, the contract.** In order:
 
 1. `python3 -I gates.py` matches the digits under Gates. Confirm what bounds a port: 250,000 gas a call, 32 storage slots, no inline assembly, the runtime code size limit.
 2. Compress, in Python on the replica: the smallest table set that keeps the Gaussian + `qm` policy within 0.2 of +3.77. Things to try: knot subsets, the mirror ask(w, R) = bid(-w, -R), fewer sd levels, one rival mode. Expand a candidate back to the shipped grid, save it in the format of `qm_k1e-5.json` and score it with `run.py gauss 10000 2048 out.json soft=1 qm=<file>` against `ref/gauss_qm.json`.
-3. Port steps 1 to 6 of the reference policy above to Solidity with the compressed tables. Gates: fees within 0.01 bps of `real.py` on the callbacks of 20 replica runs; afterSwap peak at most 245,000 gas; no OutOfGas; `amm-match validate` passes.
+3. Port steps 1 to 6 of the reference policy above to Solidity. Prove parity first with the six plain tables (the quickest target, +2.83), then move to the compressed `qm` tables, which the entry needs (+3.77). Gates: fees within 0.01 bps of `real.py` on the callbacks of 20 replica runs; afterSwap peak at most 245,000 gas; no OutOfGas and no revert; `amm-match validate` passes. KIT-B (https://api.imd.fun/artifacts/48cd6a10f39fc22a79c5f12398474bd65282803d59314819acd586f187015808, from goal cc45e1a7) has an EVM-against-port harness; feed it callbacks recorded from replica runs.
 4. Engine: the port and IB, each alone against VanillaStrategy on the same fresh seeds from 12,000,000 up, paired. The bar is +2.7 over IB on 4,000 seeds.
 
 **Track B, arb or retail.** Plain Python on the replica, so any machine can run it. The reference misreads 16% of the first trades of a step. Reading them all right is worth +2.72 (`ref/flag_qm.json` against `ref/lattice_qm.json`), which is the distance from 7th to the top two. One idea per item, measured alone:
@@ -108,14 +120,14 @@ The old table scores 445.678 / 572.593 / 527.968 on those three seeds.
 - per-run estimates of sigma and of the order rate inside the classifier;
 - the router likelihood per price hypothesis, each hypothesis carrying its own rival spot;
 - a correction trained through the filter, starting from the tables;
-- anything else: two items should get this README without this list.
+- anything else: two items start from the question alone, with a brief that tells them to skip this list.
 
 A numba port of `replica2.py` + `latt.py` that matches `gates.py` to the digit is worth an early item; the pure Python lattice takes about a second a run.
 
 **Rules for both.**
 
 - A policy sees what afterSwap sees. `run.py` enforces it; a result from any other harness needs the same blindness.
-- Tune on replica seeds 60000 and up. Score once on 10000..12047 and report `pair.py`'s output against the nearest reference in `ref/`.
+- Tune on replica seeds 60000 and up. Score once on 10000..12047 and report the `paired{...}` line `pair.py` gives against the nearest reference in `ref/`.
 - Every Track B result carries its misread rate, its price error and what the idea would cost in gas.
 - What Track B wins by 0.3 or more goes into Track A's next port.
 
@@ -132,7 +144,7 @@ Goals 077d20ed and cc45e1a7 trained fee heads on these machines on 2026-11-09. T
 - **Canary holds.** A batch wider than five holds the rest behind its first five. Batches of five or fewer start at once.
 - **Results.** One JSON object under 60,000 bytes. Code travels as `code_zb64` with its sha256, so the next item starts from the result's URL. Paired statistics carry sum and sumsq so blocks pool; never average standard errors. `valid` is false on any OutOfGas, any revert or an afterSwap peak over 245,000.
 - **Seeds.** Keep a ledger; an engine seed is used once. The two goals have taken engine seeds below 9,000,000. This work starts at 12,000,000.
-- **Replica against engine.** A port's gain over IB on the engine should sit within 0.15 of its Python twin's gain over IB's port on the replica. If it does not, the port or the replica is wrong: find out which before anything else.
+- **Replica against engine.** IB is +0.59 over HA on the engine, so a port's gain over IB there should sit within 0.2 of its Python twin's replica gain over HA minus 0.59. If it does not, the port or the replica is wrong: find out which before anything else.
 
 Where that lane stands: IB 0, J5 +0.55, J11 +0.60, T03 +0.77 over IB after about 350 items, which is roughly 13th. Its own planner wrote that the top 10 is out of reach in its remaining rounds.
 
@@ -150,11 +162,11 @@ python3 -I pair.py part0.json,part1.json,part2.json,part3.json ref/lattice_qm.js
 
 ## Open
 
-1. **The contract.** The tables are 8 MB of JSON and the lattice is 121 cells; the budget is 250k gas. A first port is the Gaussian filter with the six plain tables (+2.83): O(1) state, and it needs ln, exp and a normal CDF. Match `gates.py` to the digit before changing anything, then measure what coarser knots cost with the same harness.
+1. **The contract (Track A).** The tables are 8 MB of JSON and the lattice is 121 cells; the budget is 250,000 gas a call and the code size limit. The Gaussian filter has O(1) state and needs ln, exp and a normal CDF. Match `gates.py` to the digit before changing anything, then measure what coarser knots cost with the same harness.
 2. **The engine.** Run the port and IB on the same fresh engine seeds and pair them. The top-10 line is +2.66 over IB; the reference policies sit at +2.24 (Gaussian, plain tables), +3.18 (Gaussian, `qm`) and +3.67 (lattice) over IB if replica gaps carry. Seeds used here are replica seeds (10000..12047 holdout; 20000..20511, 30000..31999, 40000..40111, 50000..50083 for tuning and diagnostics). No engine seed was consumed.
 3. **Arb or retail (Track B).** Worth 2.7. Tried, no gain: forbidding the quote zone where the two overlap (`DP_MASK`, costs 0.6 to 2.4 with perfect information and leaves the error at 13 to 15%), buying more pins with tighter quotes (kappa above 1e-5 costs more than it returns), a quote-aware fill likelihood. A table classifier on the filter's own features gets 18.8% against the lattice's 16.2%, so the error is near what those features allow. Not tried: choosing quotes against the whole lattice posterior instead of its mean and sd, per-run estimates of sigma and order rate inside the classifier, the router likelihood per price hypothesis.
 4. **Finer lattice.** Offsets are on 5 bps with a parabola fit; a 2.5 bps solve is untested.
 
 ## Files
 
-`dp.py` solver. `qmdp.py` uncertainty-aware tables from the solver's saved values. `replica2.py` the replica with a phase count, a size cap and fee accounting. `evalpol.py` perfect-information scoring. `track.py` one handicap at a time. `real.py` Gaussian filter. `latt.py` lattice filter. `run.py` blind runner for any policy and seed range. `pair.py` paired comparison. `example_policy.py` the policy interface. `ref/` per-seed reference results. `gates.py` per-seed check values. `stale.py`, `fillstat.py`, `clsdata.py`, `trace.py`, `fixedcheck2.py` diagnostics. Everything except `dp.py` and `qmdp.py` is plain `python3 -I` with no dependencies.
+`dp.py` solver. `qmdp.py` uncertainty-aware tables from the solver's saved values. `replica2.py` the replica with a phase count, a size cap and fee accounting. `evalpol.py` perfect-information scoring. `track.py` one handicap at a time. `real.py` Gaussian filter. `latt.py` lattice filter. `run.py` blind runner for any policy and seed range. `pair.py` paired comparison. `example_policy.py` the policy interface. `ref/` per-seed reference results. `gates.py` per-seed check values. `stale.py`, `fillstat.py`, `clsdata.py`, `trace.py`, `fixedcheck2.py` diagnostics. `par.py` process pool with a one-process fallback (`PROCS=<n>`). `fetch.sh` and `SHA256SUMS` fetch and check the folder. Everything except `dp.py` and `qmdp.py` is plain `python3 -I` with no dependencies.

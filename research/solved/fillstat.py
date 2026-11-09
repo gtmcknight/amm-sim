@@ -1,7 +1,7 @@
 """Calibrate the arb-vs-retail classifier: size of the first trade of a step, by true type, under the solved policy."""
 import sys, os, math, json
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R
 from evalpol import DPPolicy, load
 
@@ -23,7 +23,7 @@ def ev(seeds):
 
 if __name__ == '__main__':
     seeds = list(range(40000, 40112))
-    with Pool(14) as pool: res = pool.map(ev, [seeds[i:i+8] for i in range(0, len(seeds), 8)])
+    res = pmap(ev, [seeds[i:i+8] for i in range(0, len(seeds), 8)])
     rows = [r for b in res for r in b]
     arb = [r for r in rows if r[0]]; ret = [r for r in rows if not r[0]]
     n = len(seeds)

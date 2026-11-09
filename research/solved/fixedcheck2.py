@@ -1,6 +1,8 @@
+"""Fixed-fee scores on the replica at midpoint parameters, with fee accounting (fees - edge = 22.2).
+usage: python3 -I fixedcheck2.py [size_cap]"""
 import sys, os
-from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from par import pmap
 import replica2 as R
 CFG = (20.0, 0.8, 0.000945)
 QCAP = float(sys.argv[1]) if len(sys.argv) > 1 else None
@@ -13,9 +15,9 @@ def ev(a):
     return out
 if __name__ == '__main__':
     seeds = list(range(30000, 32000))
-    with Pool(14) as pool:
+    if True:
         for fee in (0.003, 0.0075):
-            res = pool.map(ev, [(fee, seeds[i:i+25]) for i in range(0, len(seeds), 25)])
+            res = pmap(ev, [(fee, seeds[i:i+25]) for i in range(0, len(seeds), 25)])
             rows = [x for b in res for x in b]
             n = len(rows); m = [sum(r[i] for r in rows)/n for i in range(6)]
             sd = (sum((r[0]-m[0])**2 for r in rows)/(n-1))**0.5

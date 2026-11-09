@@ -9,15 +9,16 @@ usage: python3 -I run.py <policy> <seed0> <n> <out.json> [key=val ...]
                               reserve_x, reserve_y) -> (bid_fee, ask_fee). is_buy = the pool bought X.
                               T is pol.json (default pol_mid.json, or pol=<file>), opt the key=val pairs.
   Any seed range, so long runs can be cut into chunks; pair.py joins and compares them.
+  PROCS=<n> sets the process count (default every CPU; 1 runs in this process).
 
 A blind policy never receives the true price, the rival's spot, the arb flag, the order count or the run's
 parameters. If it keeps `m` (ln of its price estimate) the price error is reported; if it sets `first` and
 `is_arb` on each call, so is the share of first trades it misread.
 """
 import sys, os, math, json, time, importlib
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R
 from evalpol import DPPolicy, load, stats, CALIB
 
@@ -70,10 +71,9 @@ def work(a):
     return out
 
 
-def run_policy(policy, opt, seeds, pol_path=DEFAULT_POL, procs=None, chunk=8):
+def run_policy(policy, opt, seeds, pol_path=DEFAULT_POL, chunk=8):
     tasks = [(policy, opt, seeds[i:i + chunk], pol_path) for i in range(0, len(seeds), chunk)]
-    with Pool(procs or os.cpu_count()) as pool:
-        res = pool.map(work, tasks, chunksize=1)
+    res = pmap(work, tasks)
     return sorted((r for b in res for r in b), key=lambda r: r['seed'])
 
 

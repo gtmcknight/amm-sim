@@ -1,7 +1,7 @@
 """How stale is the last arb pin when retail hits, under the solved perfect-information policy?"""
 import sys, os, math, json
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
+from par import pmap
 import replica2 as R
 from evalpol import DPPolicy, load
 
@@ -32,7 +32,7 @@ def ev(seeds):
 
 if __name__ == '__main__':
     seeds = list(range(10000, 10280))
-    with Pool(14) as pool: res = pool.map(ev, [seeds[i:i+20] for i in range(0, len(seeds), 20)])
+    res = pmap(ev, [seeds[i:i+20] for i in range(0, len(seeds), 20)])
     H = {}; S = {}; V = {}; na = nr = 0
     for h, s, v, a, r in res:
         for k in h: H[k] = H.get(k, 0) + h[k]; S[k] = S.get(k, 0) + s[k]; V[k] = V.get(k, 0) + v[k]
