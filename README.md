@@ -50,3 +50,7 @@ maturin build --release --strip --locked --zig --target x86_64-unknown-linux-gnu
 # wheel B: git apply instrumentation.patch; set version = "0.1.0.post1" in amm_sim_rs/pyproject.toml; build again
 unzip -p dist/<wheel>.whl amm_sim_rs/amm_sim_rs.abi3.so | sha256sum   # A 414ea6d2…, B ff88b635…
 ```
+
+## Research
+
+`research/solved/`: the Simple AMM game solved with perfect information, the policy tables, and reference code that runs them on real `afterSwap` inputs (2026-11-09). It supersedes the reading in `research/filter-brief.md`.
