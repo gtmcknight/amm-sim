@@ -14,6 +14,7 @@ This replaces the reading in `../filter-brief.md`: the perfect-price table there
 |---|---|---|---|
 | old 35-knot table (`../oracle_table.json`) | true price | 534.53 | +4.97 |
 | #1 on the board (IB + 6.40) | real | | about +7.0 |
+| T03, the best of the training goals 077d20ed and cc45e1a7 (IB + 0.77 on 2,048 fresh engine seeds) | real | | about +1.4 |
 | **solved policy** | true price and rival | 538.26 | **+8.70** se 0.05 |
 | solved policy, rival tracked from own trades | true price | 538.06 | +8.50 |
 | solved policy, real inputs plus the true arb/retail flag | real + flag | 536.54 | +6.98 se 0.04 |
@@ -98,7 +99,7 @@ The old table scores 445.678 / 572.593 / 527.968 on those three seeds.
 1. `python3 -I gates.py` matches the digits under Gates. Confirm what bounds a port: 250,000 gas a call, 32 storage slots, no inline assembly, the runtime code size limit.
 2. Compress, in Python on the replica: the smallest table set that keeps the Gaussian + `qm` policy within 0.2 of +3.77. Things to try: knot subsets, the mirror ask(w, R) = bid(-w, -R), fewer sd levels, one rival mode. Expand a candidate back to the shipped grid, save it in the format of `qm_k1e-5.json` and score it with `run.py gauss 10000 2048 out.json soft=1 qm=<file>` against `ref/gauss_qm.json`.
 3. Port steps 1 to 6 of the reference policy above to Solidity with the compressed tables. Gates: fees within 0.01 bps of `real.py` on the callbacks of 20 replica runs; afterSwap peak at most 245,000 gas; no OutOfGas; `amm-match validate` passes.
-4. Engine: the port and IB, each alone against VanillaStrategy on the same fresh seeds, paired. The bar is +2.7 over IB on 4,000 seeds.
+4. Engine: the port and IB, each alone against VanillaStrategy on the same fresh seeds from 12,000,000 up, paired. The bar is +2.7 over IB on 4,000 seeds.
 
 **Track B, arb or retail.** Plain Python on the replica, so any machine can run it. The reference misreads 16% of the first trades of a step. Reading them all right is worth +2.72 (`ref/flag_qm.json` against `ref/lattice_qm.json`), which is the distance from 7th to the top two. One idea per item, measured alone:
 
@@ -117,6 +118,23 @@ A numba port of `replica2.py` + `latt.py` that matches `gates.py` to the digit i
 - Tune on replica seeds 60000 and up. Score once on 10000..12047 and report `pair.py`'s output against the nearest reference in `ref/`.
 - Every Track B result carries its misread rate, its price error and what the idea would cost in gas.
 - What Track B wins by 0.3 or more goes into Track A's next port.
+
+## Fleet rules (what two earlier goals on this fleet paid to learn)
+
+Goals 077d20ed and cc45e1a7 trained fee heads on these machines on 2026-11-09. The first lost 32 of its first 104 results to blocks, the second 14 of 205. Each cause below comes with the rule it gives.
+
+- **Speed gates (12 results).** Seats have 1 to 32 CPUs, median 8, and a quarter have 4 or fewer. A rule "search only at 300 markets a second" stopped every 2-CPU seat. No item blocks on speed: a slow seat takes Track B idea work, table compression or a smaller engine block, and says how much it finished.
+- **A parity gate on synthetic stress paths (6).** T03's Solidity divides by zero at reserves no market reaches, and the harness's stress sequences (trades up to 15% of the reserve) found it; the engine ran it 11 million calls clean. Gate fee parity on callbacks recorded from replica runs. Run stress sequences as well and report them, and write the contract so it cannot revert, but do not gate on them.
+- **Engine time (8).** With a 238,000-gas contract the engine did 128 markets in 460 s on 6 CPUs. Engine work runs in 64-seed commands, sized to the seat (256 seeds on a slow one); report n per arm and never fill in a missing seed.
+- **Machines that cannot run the wheel (about 1 in 20).** macOS arm64 and other seats that are not Linux x86_64 stop at SETUP. They take Track B or compression, which need only python3.
+- **Seats that cannot reach api.imd.fun (2).** Nothing a brief can mend. Give each line of work a spare copy.
+- **Refused briefs (four batches).** The plane refuses a brief that asks for a command's raw text back, and one whose placeholder is missing from an item's vars. Ask for numbers in the JSON result; put every placeholder, `key` included, in every item's vars as a string; keep a filled brief under 2,900 ASCII characters.
+- **Canary holds.** A batch wider than five holds the rest behind its first five. Batches of five or fewer start at once.
+- **Results.** One JSON object under 60,000 bytes. Code travels as `code_zb64` with its sha256, so the next item starts from the result's URL. Paired statistics carry sum and sumsq so blocks pool; never average standard errors. `valid` is false on any OutOfGas, any revert or an afterSwap peak over 245,000.
+- **Seeds.** Keep a ledger; an engine seed is used once. The two goals have taken engine seeds below 9,000,000. This work starts at 12,000,000.
+- **Replica against engine.** A port's gain over IB on the engine should sit within 0.15 of its Python twin's gain over IB's port on the replica. If it does not, the port or the replica is wrong: find out which before anything else.
+
+Where that lane stands: IB 0, J5 +0.55, J11 +0.60, T03 +0.77 over IB after about 350 items, which is roughly 13th. Its own planner wrote that the top 10 is out of reach in its remaining rounds.
 
 ## Harness
 
