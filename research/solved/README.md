@@ -80,22 +80,63 @@ python3 -I track.py pol_mid.json none rival,count                # +8.704, +8.49
 python3 -I real.py pol_mid.json plain:soft=1 qm:soft=1,qm=qm_k1e-5.json    # +2.828, +3.769
 python3 -I latt.py pol_mid.json lattice:qm=qm_k1e-5.json         # +4.263 se 0.039 (NSEED=112: +4.212)
 python3 -I real.py pol_mid.json flag:oraclearb=1,qm=qm_k1e-5.json          # +6.985: reads the true flag, a diagnostic and not a policy
+python3 -I pair.py ref/flag_qm.json ref/lattice_qm.json                    # mean_diff 2.7219 se 0.0209
 
 # solver, needs numpy + numba (uv venv --python 3.12 venv; uv pip install numpy numba)
 DP_SAVEVN=1 DP_AMINL=-12 DP_NA=43 python dp.py solve 0.8 9.45 20 pol_mid.json     # 536.821, tables identical to the file here
 DP_AMINL=-12 DP_NA=43 python qmdp.py pol_mid.json qm.json 1e-5                    # identical to qm_k1e-5.json
 DP_QCAP=300 DP_NW=100 DP_AMINL=-60 DP_NA=91 python dp.py fixed 30                 # 334.772
+# on a slow machine add DP_STATE=st.npz DP_SWEEPS=40 and repeat the solve command until it prints SOLVED; same tables
 ```
 
 The old table scores 445.678 / 572.593 / 527.968 on those three seeds.
+
+## Two tracks for a goal
+
+**Track A, the contract.** In order:
+
+1. `python3 -I gates.py` matches the digits under Gates. Confirm what bounds a port: 250,000 gas a call, 32 storage slots, no inline assembly, the runtime code size limit.
+2. Compress, in Python on the replica: the smallest table set that keeps the Gaussian + `qm` policy within 0.2 of +3.77. Things to try: knot subsets, the mirror ask(w, R) = bid(-w, -R), fewer sd levels, one rival mode. Expand a candidate back to the shipped grid, save it in the format of `qm_k1e-5.json` and score it with `run.py gauss 10000 2048 out.json soft=1 qm=<file>` against `ref/gauss_qm.json`.
+3. Port steps 1 to 6 of the reference policy above to Solidity with the compressed tables. Gates: fees within 0.01 bps of `real.py` on the callbacks of 20 replica runs; afterSwap peak at most 245,000 gas; no OutOfGas; `amm-match validate` passes.
+4. Engine: the port and IB, each alone against VanillaStrategy on the same fresh seeds, paired. The bar is +2.7 over IB on 4,000 seeds.
+
+**Track B, arb or retail.** Plain Python on the replica, so any machine can run it. The reference misreads 16% of the first trades of a step. Reading them all right is worth +2.72 (`ref/flag_qm.json` against `ref/lattice_qm.json`), which is the distance from 7th to the top two. One idea per item, measured alone:
+
+- quotes chosen against the whole lattice posterior instead of its mean and sd (the value arrays come from `DP_SAVEVN=1`);
+- keep the arb reading and the retail reading as two explicit hypotheses, and choose the next quotes so the next arb tells them apart;
+- per-run estimates of sigma and of the order rate inside the classifier;
+- the router likelihood per price hypothesis, each hypothesis carrying its own rival spot;
+- a correction trained through the filter, starting from the tables;
+- anything else: two items should get this README without this list.
+
+A numba port of `replica2.py` + `latt.py` that matches `gates.py` to the digit is worth an early item; the pure Python lattice takes about a second a run.
+
+**Rules for both.**
+
+- A policy sees what afterSwap sees. `run.py` enforces it; a result from any other harness needs the same blindness.
+- Tune on replica seeds 60000 and up. Score once on 10000..12047 and report `pair.py`'s output against the nearest reference in `ref/`.
+- Every Track B result carries its misread rate, its price error and what the idea would cost in gas.
+- What Track B wins by 0.3 or more goes into Track A's next port.
+
+## Harness
+
+```
+python3 -I run.py lattice 60000 256 base.json qm=qm_k1e-5.json             # a reference on tuning seeds
+python3 -I run.py mymodule:MyPolicy 60000 256 cand.json qm=qm_k1e-5.json    # yours on the same seeds
+python3 -I pair.py cand.json base.json                                      # paired{n, mean_diff, se, worst5}
+python3 -I run.py mymodule:MyPolicy 10000 512 part0.json qm=qm_k1e-5.json   # the holdout, in chunks
+python3 -I pair.py part0.json,part1.json,part2.json,part3.json ref/lattice_qm.json
+```
+
+`run.py` takes any seed range and writes per-seed rows. Policies are `perfect`, `gauss`, `lattice`, or `module:Class` for your own; `example_policy.py` is the smallest one it accepts. `ref/` holds per-seed results on the holdout for `perfect`, `gauss_plain`, `gauss_qm`, `lattice_qm` and `flag_qm` (the true-flag diagnostic), so nobody reruns them.
 
 ## Open
 
 1. **The contract.** The tables are 8 MB of JSON and the lattice is 121 cells; the budget is 250k gas. A first port is the Gaussian filter with the six plain tables (+2.83): O(1) state, and it needs ln, exp and a normal CDF. Match `gates.py` to the digit before changing anything, then measure what coarser knots cost with the same harness.
 2. **The engine.** Run the port and IB on the same fresh engine seeds and pair them. The top-10 line is +2.66 over IB; the reference policies sit at +2.24 (Gaussian, plain tables), +3.18 (Gaussian, `qm`) and +3.67 (lattice) over IB if replica gaps carry. Seeds used here are replica seeds (10000..12047 holdout; 20000..20511, 30000..31999, 40000..40111, 50000..50083 for tuning and diagnostics). No engine seed was consumed.
-3. **Arb or retail.** Worth 2.7. Tried, no gain: forbidding the quote zone where the two overlap (`DP_MASK`, costs 0.6 to 2.4 with perfect information and leaves the error at 13 to 15%), buying more pins with tighter quotes (kappa above 1e-5 costs more than it returns), a quote-aware fill likelihood. A table classifier on the filter's own features gets 18.8% against the lattice's 16.2%, so the error is near what those features allow. Not tried: choosing quotes against the whole lattice posterior instead of its mean and sd, per-run estimates of sigma and order rate inside the classifier, the router likelihood per price hypothesis.
+3. **Arb or retail (Track B).** Worth 2.7. Tried, no gain: forbidding the quote zone where the two overlap (`DP_MASK`, costs 0.6 to 2.4 with perfect information and leaves the error at 13 to 15%), buying more pins with tighter quotes (kappa above 1e-5 costs more than it returns), a quote-aware fill likelihood. A table classifier on the filter's own features gets 18.8% against the lattice's 16.2%, so the error is near what those features allow. Not tried: choosing quotes against the whole lattice posterior instead of its mean and sd, per-run estimates of sigma and order rate inside the classifier, the router likelihood per price hypothesis.
 4. **Finer lattice.** Offsets are on 5 bps with a parabola fit; a 2.5 bps solve is untested.
 
 ## Files
 
-`dp.py` solver. `qmdp.py` uncertainty-aware tables from the solver's saved values. `replica2.py` the replica with a phase count, a size cap and fee accounting. `evalpol.py` perfect-information scoring. `track.py` one handicap at a time. `real.py` Gaussian filter. `latt.py` lattice filter. `gates.py` per-seed check values. `stale.py`, `fillstat.py`, `clsdata.py`, `trace.py`, `fixedcheck2.py` diagnostics. Everything except `dp.py` and `qmdp.py` is plain `python3 -I` with no dependencies.
+`dp.py` solver. `qmdp.py` uncertainty-aware tables from the solver's saved values. `replica2.py` the replica with a phase count, a size cap and fee accounting. `evalpol.py` perfect-information scoring. `track.py` one handicap at a time. `real.py` Gaussian filter. `latt.py` lattice filter. `run.py` blind runner for any policy and seed range. `pair.py` paired comparison. `example_policy.py` the policy interface. `ref/` per-seed reference results. `gates.py` per-seed check values. `stale.py`, `fillstat.py`, `clsdata.py`, `trace.py`, `fixedcheck2.py` diagnostics. Everything except `dp.py` and `qmdp.py` is plain `python3 -I` with no dependencies.

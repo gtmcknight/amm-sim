@@ -5,16 +5,18 @@ Filter: Gaussian belief over ln p (mean, variance).
   - first trade of a step: arb or retail by likelihood ratio. Arb => p is exact (post-trade spot through the fee in force).
     Retail => belief truncated to the no-arb interval.
 Rival: absolute spot dead-reckoned (router identity on own retail trades, band clip against the price estimate).
-Policy: table lookup at the estimates.  Oracle arguments are used for diagnostics only.
+Policy: table lookup at the estimates.
 
-usage: python3 -I real.py <pol.json> [variant ...]      variants: ce | qm:<qmdp.json> ...
+on_trade takes exactly what afterSwap gets. run.py's Blind wrapper is what the replica talks to; it hides the
+true price, the rival's spot, the arb flag and the run's parameters, and takes the diagnostics itself.
+
+usage: python3 -I real.py <pol.json> [name:key=val,...]      e.g. plain:soft=1   qm:soft=1,qm=qm_k1e-5.json
 """
 import sys, os, math, json, time
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replica2 as R
-from evalpol import DPPolicy, load, stats, CALIB
+from evalpol import DPPolicy, load
 
 G2 = 1.0 - R.NF
 SIG2 = 0.000945 ** 2
@@ -47,7 +49,6 @@ def trunc(m, v, lo, hi):
 
 
 class RealPolicy(DPPolicy):
-    wants_j = True
     def __init__(self, T, opt=None):
         DPPolicy.__init__(self, T)
         self.o = opt or {}
@@ -58,8 +59,9 @@ class RealPolicy(DPPolicy):
         self.s2h = 100.0
         self.fb = self.fa = 0.003
         self.sp = 100.0               # own spot after our last callback
-        # diagnostics
-        self.nmis = 0; self.ncls = 0; self.se = 0.0; self.nse = 0; self.se2 = 0.0
+        self.first = False            # this call was the first own trade of its step
+        self.is_arb = False           # and it was read as the arb
+        self.needs_flag = bool(self.o.get('oraclearb'))   # diagnostic only: be told the true arb/retail flag
     def init(self, *a):
         fb, fa = self._fees(0.0, 0.0, 0)
         self.fb, self.fa = R.clampf(fb), R.clampf(fa)
@@ -97,10 +99,11 @@ class RealPolicy(DPPolicy):
         fa = 1.0 - math.exp(-(a - w) * 1e-4) if a > w else 0.0
         fb = 1.0 - math.exp(-(b + w) * 1e-4) if b > -w else 0.0
         return fb, fa
-    def on_trade(self, is_buy, ax, ay, t, x, y, arb, p, s2, j):
+    def on_trade(self, is_buy, ax, ay, t, x, y, flag=None):
         s = y / x
         dt = t - self.tlast
         is_arb = False
+        self.first = dt >= 1
         if dt >= 1:
             self.cnt = 0
             lo = math.log(self.sp * (1.0 - self.fb)); hi = math.log(self.sp / (1.0 - self.fa))   # no-arb interval of the quotes in force
@@ -138,10 +141,8 @@ class RealPolicy(DPPolicy):
             else:
                 l_ret = Z * RHO * phi((math.log(max(d, 1e-9)) - LD_M) / LD_S) / (max(d, 1e-9) * LD_S)
             pi = l_arb / (l_arb + l_ret) if (l_arb + l_ret) > 0 else 0.0
-            if o.get('oraclearb', 0): pi = 1.0 if arb else 0.0
+            if o.get('oraclearb', 0): pi = 1.0 if flag else 0.0
             is_arb = pi > 0.5
-            self.ncls += 1
-            if is_arb != arb: self.nmis += 1
             if o.get('soft', 0) and pi < o.get('hard', 0.995) and pi > 1.0 - o.get('hard', 0.995):
                 m2 = pi * lp_arb + (1.0 - pi) * mt
                 v2 = pi * (lp_arb - m2) ** 2 + (1.0 - pi) * (vt + (mt - m2) ** 2)
@@ -167,9 +168,7 @@ class RealPolicy(DPPolicy):
             phs = 1 if self.cnt <= 1 else 2
         else:
             phs = 0
-        err = (self.m - math.log(p)) * 1e4
-        self.se += err * err; self.nse += 1
-        if not is_arb: self.se2 += err * err
+        self.is_arb = is_arb
         self.tlast = t; self.sp = s
         w = (math.log(s) - self.m) * 1e4; w2 = (math.log(self.s2h) - self.m) * 1e4
         fb, fa = self.lookup(w, w2, phs, math.sqrt(self.v) * 1e4)
@@ -177,40 +176,25 @@ class RealPolicy(DPPolicy):
         return fb, fa
 
 
-def ev(a):
-    path, opt, seeds = a
-    T = load(path); out = []
-    for s in seeds:
-        pol = RealPolicy(T, opt)
-        r = R.run(s, pol)
-        out.append((s, r['edge'], r['retail'], r['arb'], r['rv'], r['av'], pol.nmis, pol.ncls, pol.se, pol.nse))
+def variants(argv):
+    """name:key=val,... -> [(name, opt)]"""
+    out = []
+    for spec in argv:
+        name, _, kv = spec.partition(':')
+        opt = {}
+        for item in kv.split(','):
+            if item:
+                k, _, val = item.partition('=')
+                opt[k] = os.path.join(HERE, val) if k == 'qm' else float(val)
+        out.append((spec, opt))
     return out
 
 
-def report(pool, path, opt, seeds, ref, label):
-    t0 = time.time()
-    res = pool.map(ev, [(path, opt, seeds[i:i + 8]) for i in range(0, len(seeds), 8)], chunksize=1)
-    res = {r[0]: r for b in res for r in b}
-    n = len(seeds); mean = lambda i: sum(res[s][i] for s in seeds) / n
-    mh, seh = stats([res[s][1] - ref['HA'][s]['edge'] for s in seeds])
-    mis = sum(res[s][6] for s in seeds) / max(1, sum(res[s][7] for s in seeds))
-    rms = math.sqrt(sum(res[s][8] for s in seeds) / max(1, sum(res[s][9] for s in seeds)))
-    print(f'{label:24s} edge {mean(1):8.3f} retail {mean(2):8.3f} arb {mean(3):7.3f} rv {mean(4):6.0f} av {mean(5):6.0f}  vs HA {mh:+.3f} se {seh:.3f}  misclass {mis:.2%}  p rms {rms:.1f} bps ({time.time()-t0:.0f}s)', flush=True)
-    return res
-
-
 if __name__ == '__main__':
+    import run
     path = sys.argv[1]
-    n = int(os.environ.get('NSEED', '2048'))
-    seeds = list(range(10000, 10000 + n))
-    rows = json.load(open(CALIB)); ref = {}
-    for r in rows: ref.setdefault(r['kind'], {})[r['seed']] = r
-    with Pool(14) as pool:
-        for spec in (sys.argv[2:] or ['ce']):
-            name, _, kv = spec.partition(':')
-            opt = {}
-            for item in kv.split(','):
-                if item:
-                    k, _, val = item.partition('=')
-                    opt[k] = os.path.join(HERE, val) if k == 'qm' else float(val)
-            report(pool, path, opt, seeds, ref, spec)
+    n = int(os.environ.get('NSEED', '2048')); s0 = int(os.environ.get('SEED0', '10000'))
+    for spec, opt in variants(sys.argv[2:] or ['plain:soft=1']):
+        t0 = time.time()
+        rows = run.run_policy('gauss', opt, list(range(s0, s0 + n)), path)
+        print(run.line(spec, rows) + f' ({time.time()-t0:.0f}s)', flush=True)

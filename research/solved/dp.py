@@ -14,6 +14,9 @@ Average-reward relative value iteration; one sweep = one step of lookahead.
 usage: dp.py solve <lam> <sigma_bps> <size_mean> <out.json>
        dp.py fixed <fee_bps> [lam sigma size]       (model check against the replica's fixed-fee scores)
 env:   DP_NW (half-range of w in lattice units, default 160), DP_AMINL (default -8), DP_NA (default 39), DP_QSTEP (0.125)
+       DP_SAVEVN=1 also saves the value arrays qmdp.py needs. DP_MASK=lo,hi forbids quotes strictly between two offsets.
+       DP_STATE=<file.npz> with DP_SWEEPS=<n>: stop after n sweeps and save; the same command again resumes. The
+       result is identical to an uninterrupted solve, so a slow machine can stay under a time limit per command.
 """
 import sys, os, math, json, time
 import numpy as np
@@ -272,7 +275,11 @@ def solve(lam, sigma_bps, size_mean, fixed_fee_l=-1, tol=2e-7, max_sweeps=600, v
     VN2 = np.zeros((NW, N2, NA, NA))
     g = 0.0
     lo, hi = C2 - FB, C2 + FB + 1
-    for it in range(max_sweeps):
+    state = os.environ.get('DP_STATE'); budget = int(os.environ.get('DP_SWEEPS', '0')); start = 0
+    if state and os.path.exists(state):
+        z = np.load(state); VD0 = z['VD0']; VN0 = z['VN0']; VN2 = z['VN2']; start = int(z['it']); g = float(z['g'])
+        if verbose: print(f'resumed at sweep {start}', flush=True)
+    for it in range(start, max_sweeps):
         S = step_end(VD0, VN0, PZ, SQ, EW)
         VD2, IA2, IB2 = decide(VN2, fixed_fee_l)
         GB2, GS2 = build_G(VD2, ed, posw, pos2, KB, PQ)
@@ -292,6 +299,9 @@ def solve(lam, sigma_bps, size_mean, fixed_fee_l=-1, tol=2e-7, max_sweeps=600, v
         if verbose and (it % 10 == 9 or diff < tol or it < 3):
             print(f'sweep {it+1} t {time.time()-t0:.0f}s gain/step {g:.7f} -> {g*1e4:.3f} per run  diff {diff:.2e}', flush=True)
         if diff < tol: break
+        if state and budget and it + 1 - start >= budget:
+            np.savez(state, VD0=VD0, VN0=VN0, VN2=VN2, it=it + 1, g=g)
+            return dict(paused=it + 1, g=g)
     return dict(g=g, VD=(VD0, VD1, VD2), VN=(VN0, VN1, VN2), IA=(IA0, IA1, IA2), IB=(IB0, IB1, IB2), hs=hs)
 
 
@@ -330,6 +340,9 @@ if __name__ == '__main__':
     else:
         lam, sg, sz, out = float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
         r = solve(lam, sg, sz)
+        if 'paused' in r:
+            print(f'PAUSED after sweep {r["paused"]} (gain so far {r["g"]*1e4:.3f}); run the same command again to continue')
+            sys.exit(0)
         tabs = {}
         for j in range(3):
             A, B = refine(r['VN'][j], r['IA'][j], r['IB'][j])

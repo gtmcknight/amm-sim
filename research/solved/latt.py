@@ -5,17 +5,16 @@ price-move kernel; a step with no own trade zeroes the cells where the arb would
 of a step is a mixture of "arb" (p exactly at the post-trade band edge) and "retail" (p inside the no-arb interval),
 weighted by likelihood.  Nothing is thrown away, so a later pin resolves an earlier ambiguous trade.
 Quotes: moment-matched (mean, sd) into the uncertainty-aware tables.
+on_trade takes exactly what afterSwap gets (see real.py and run.py).
 
-usage: python3 -I latt.py <pol.json> name:key=val,... [more]
+usage: python3 -I latt.py <pol.json> name:key=val,... [more]      e.g. lattice:qm=qm_k1e-5.json
 """
 import sys, os, math, json, time
-from multiprocessing import Pool
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replica2 as R
 import real
 from real import RealPolicy, phi, G2, RHO, LD_M, LD_S, H0, LD_FULL
-from evalpol import load, stats, CALIB
 
 HC = 2.5e-4            # cell width (log)
 NC = 121               # cells: +-150 bps
@@ -111,11 +110,12 @@ class LatticePolicy(RealPolicy):
         if 0 <= i < NC: self.P[i] += w * (1 - f); self.lo_i = min(self.lo_i, i); self.hi_i = max(self.hi_i, i)
         if 0 <= i + 1 < NC: self.P[i + 1] += w * f; self.lo_i = min(self.lo_i, i + 1); self.hi_i = max(self.hi_i, i + 1)
     # ---- callback
-    def on_trade(self, is_buy, ax, ay, t, x, y, arb, p, s2, j):
+    def on_trade(self, is_buy, ax, ay, t, x, y, flag=None):
         o = self.o
         s = y / x
         dt = t - self.tlast
         is_arb = False
+        self.first = dt >= 1
         if dt >= 1:
             self.cnt = 0
             lo = math.log(self.sp * (1.0 - self.fb)); hi = math.log(self.sp / (1.0 - self.fa))
@@ -141,7 +141,7 @@ class LatticePolicy(RealPolicy):
                 Z = self.cut(lo, hi)
                 l_ret = Z * o.get('rho', RHO) * phi((math.log(max(d, 1e-9)) - LD_M) / LD_S) / (max(d, 1e-9) * LD_S)
                 pi = l_arb / (l_arb + l_ret) if (l_arb + l_ret) > 0 else 1.0
-                if o.get('oraclearb', 0): pi = 1.0 if arb else 0.0
+                if o.get('oraclearb', 0): pi = 1.0 if flag else 0.0
                 hard = o.get('hard', 0.999)
                 if pi >= hard or Z <= 1e-300:
                     self.pin(lp_arb)
@@ -155,8 +155,6 @@ class LatticePolicy(RealPolicy):
                     if pi > 0.5: self.recentre(lp_arb)
                     self.deposit(lp_arb, pi)
             is_arb = pi > 0.5
-            self.ncls += 1
-            if is_arb != arb: self.nmis += 1
             self.m, self.v = self.moments()
             # keep the mass away from the window edge
             if abs(self.m - self.c) > 40 * HC: self.recentre(self.m); self.m, self.v = self.moments()
@@ -175,8 +173,7 @@ class LatticePolicy(RealPolicy):
             phs = 1 if self.cnt <= 1 else 2
         else:
             phs = 0
-        err = (self.m - math.log(p)) * 1e4
-        self.se += err * err; self.nse += 1
+        self.is_arb = is_arb
         self.tlast = t; self.sp = s
         w = (math.log(s) - self.m) * 1e4; w2 = (math.log(self.s2h) - self.m) * 1e4
         fb, fa = self.lookup(w, w2, phs, math.sqrt(self.v) * 1e4)
@@ -184,29 +181,11 @@ class LatticePolicy(RealPolicy):
         return fb, fa
 
 
-def ev(a):
-    path, opt, seeds = a
-    T = load(path); out = []
-    for s in seeds:
-        pol = LatticePolicy(T, opt)
-        r = R.run(s, pol)
-        out.append((s, r['edge'], r['retail'], r['arb'], r['rv'], r['av'], pol.nmis, pol.ncls, pol.se, pol.nse))
-    return out
-
-
 if __name__ == '__main__':
+    import run
     path = sys.argv[1]
-    n = int(os.environ.get('NSEED', '2048'))
-    seeds = list(range(10000, 10000 + n))
-    rows = json.load(open(CALIB)); ref = {}
-    for r in rows: ref.setdefault(r['kind'], {})[r['seed']] = r
-    real.ev = ev
-    with Pool(14) as pool:
-        for spec in sys.argv[2:]:
-            name, _, kv = spec.partition(':')
-            opt = {}
-            for item in kv.split(','):
-                if item:
-                    k, _, val = item.partition('=')
-                    opt[k] = os.path.join(HERE, val) if k == 'qm' else float(val)
-            real.report(pool, path, opt, seeds, ref, spec)
+    n = int(os.environ.get('NSEED', '2048')); s0 = int(os.environ.get('SEED0', '10000'))
+    for spec, opt in real.variants(sys.argv[2:]):
+        t0 = time.time()
+        rows = run.run_policy('lattice', opt, list(range(s0, s0 + n)), path)
+        print(run.line(spec, rows) + f' ({time.time()-t0:.0f}s)', flush=True)
