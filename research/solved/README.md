@@ -62,7 +62,7 @@ On each `afterSwap(isBuy, amountX, amountY, timestamp, reserveX, reserveY)`:
 ## Tables
 
 - `pol_mid.json`: `A0 B0 A1 B1 A2 B2` are ask and bid offsets in bps from the price for phases 0, 1, 2. Rows are own displacement, w = (row - 160) x 5 bps, 321 rows. Columns are rival displacement: 13 columns from -30 to +30 bps for phase 0; 49 columns at `W2L` x 5 bps for phases 1 and 2.
-- `qm_k1e-5.json`: the same offsets chosen for a price that is only known to within a spread. `S` lists the eight belief sd levels in bps. `A0c B0c` for phase 0; `A1s B1s A1c B1c A2s B2s A2c B2c` for phases 1 and 2, `s` when the rival was synced this step and `c` when its spot is the band-clipped estimate. Each is level x row x column. Level 0 equals `pol_mid.json`.
+- `qm_k1e-5.json`: the same offsets chosen for a price that is only known to within a spread. `S` lists the eight belief sd levels in bps. `A0c B0c` for phase 0; `A1s B1s A1c B1c A2s B2s A2c B2c` for phases 1 and 2, `s` when the rival was synced this step and `c` when its spot is the band-clipped estimate. Each is level x row x column. The file was built with an information weight (kappa = 1e-5, the third argument of `qmdp.py`) that favors quotes the arb will hit, so even level 0 differs from `pol_mid.json`, in about a quarter of the cells; built with kappa 0, level 0 equals it.
 
 ## Gates
 
