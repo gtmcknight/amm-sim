@@ -4,6 +4,8 @@ Written 2026-11-09. An exact dynamic program for the game with perfect informati
 
 All numbers are from the pure-Python replica (`replica2.py`, line by line from the engine at 6b6921f8), paired on replica seeds 10000..12047 against HA (mean 529.557 on those seeds, rows in `calib_out_2048.json`). Replica levels do not convert to board scores. Paired gaps have matched the engine so far (HA over T: 1.11 here, 1.01 to 1.15 on the engine). Nothing here has run on the Rust engine.
 
+The network's board entry is IB (522.00, 20th): +0.592 se 0.030 over HA on 512 fresh engine seeds (artifact `afd5183e9ff3235334e041c00b0cd19079599a2c6464db95f8c1586712105557`). Board lines below are placed through it.
+
 This replaces the reading in `../filter-brief.md`: the perfect-price table there was a search result, not a ceiling.
 
 ## Numbers
@@ -11,14 +13,14 @@ This replaces the reading in `../filter-brief.md`: the perfect-price table there
 | policy | inputs | edge | vs HA |
 |---|---|---|---|
 | old 35-knot table (`../oracle_table.json`) | true price | 534.53 | +4.97 |
-| #1 on the board, measured through IA | real | | about +6.8 |
+| #1 on the board (IB + 6.40) | real | | about +7.0 |
 | **solved policy** | true price and rival | 538.26 | **+8.70** se 0.05 |
 | solved policy, rival tracked from own trades | true price | 538.06 | +8.50 |
 | solved policy, real inputs plus the true arb/retail flag | real + flag | 536.54 | +6.98 se 0.04 |
 | lattice filter + `qm` tables | real | 533.82 | **+4.26** se 0.04 |
 | Gaussian filter + `qm` tables | real | 533.33 | +3.77 se 0.04 |
 | Gaussian filter + plain tables | real | 532.39 | +2.83 se 0.04 |
-| top-10 line (IA + 2.66) | | | +3.05 |
+| top-10 line (IB + 2.66) | | | +3.25 |
 
 ## What the solve says
 
@@ -28,7 +30,7 @@ This replaces the reading in `../filter-brief.md`: the perfect-price table there
 - **The rival's spot is known from our own trades.** After an order that splits, both pools sit at the same marginal price: rival spot = own spot x 0.997 / (1 - own fee) on a buy, own spot x (1 - own fee) / 0.997 on a sell. Tracking it that way costs 0.19.
 - **Run parameters need no adaptation.** Tables solved for each run's own order rate add +0.04. One table.
 - **Price between arb pins is the whole problem.** Using the last pin naively costs 28. Under the solved policy 35% of retail trades land in a step the arb just pinned; 23% are six or more steps stale.
-- **What separates +4.26 from #1 is one call:** is the first trade of a step the arb or retail. The filter is wrong 16% of the time. With the true answer the same code scores +6.98.
+- **What separates +4.26 from #1 is one call:** is the first trade of a step the arb or retail. The filter is wrong 16% of the time. With the true answer the same code scores +6.98, level with #1.
 
 ## The model (`dp.py`)
 
@@ -90,7 +92,7 @@ The old table scores 445.678 / 572.593 / 527.968 on those three seeds.
 ## Open
 
 1. **The contract.** The tables are 8 MB of JSON and the lattice is 121 cells; the budget is 250k gas. A first port is the Gaussian filter with the six plain tables (+2.83): O(1) state, and it needs ln, exp and a normal CDF. Match `gates.py` to the digit before changing anything, then measure what coarser knots cost with the same harness.
-2. **The engine.** Run the port and IA on the same fresh engine seeds and pair them. Seeds used here are replica seeds (10000..12047 holdout; 20000..20511, 30000..31999, 40000..40111, 50000..50083 for tuning and diagnostics). No engine seed was consumed.
+2. **The engine.** Run the port and IB on the same fresh engine seeds and pair them. The top-10 line is +2.66 over IB; the reference policies sit at +2.24 (Gaussian, plain tables), +3.18 (Gaussian, `qm`) and +3.67 (lattice) over IB if replica gaps carry. Seeds used here are replica seeds (10000..12047 holdout; 20000..20511, 30000..31999, 40000..40111, 50000..50083 for tuning and diagnostics). No engine seed was consumed.
 3. **Arb or retail.** Worth 2.7. Tried, no gain: forbidding the quote zone where the two overlap (`DP_MASK`, costs 0.6 to 2.4 with perfect information and leaves the error at 13 to 15%), buying more pins with tighter quotes (kappa above 1e-5 costs more than it returns), a quote-aware fill likelihood. A table classifier on the filter's own features gets 18.8% against the lattice's 16.2%, so the error is near what those features allow. Not tried: choosing quotes against the whole lattice posterior instead of its mean and sd, per-run estimates of sigma and order rate inside the classifier, the router likelihood per price hypothesis.
 4. **Finer lattice.** Offsets are on 5 bps with a parabola fit; a 2.5 bps solve is untested.
 
